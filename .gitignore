@@ -1,0 +1,9 @@
+node_modules/
+dist/
+out/
+*.vsix
+.vscode-test/
+*.js.map
+*.d.ts
+!src/**/*.d.ts
+.tmp/
