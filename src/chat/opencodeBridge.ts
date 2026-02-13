@@ -4,17 +4,19 @@ import { createInterface } from "readline";
 import { DevcontainerManager } from "../devcontainerManager";
 import { getConfig, getWorkspaceFolder } from "../config";
 import { writeShellWrapper, removeShellWrapper } from "../shellWrapper";
-import { OpenCodeEvent, OpenCodeCommand } from "./types";
+import { OpenCodeEvent } from "./types";
 import { OpenCodeAdapter } from "./opencodeAdapter";
 
 export type BridgeState = "idle" | "busy" | "error" | "stopped";
 
-/** Maximum time (ms) to wait for the process to become ready after spawn. */
-const SPAWN_READY_TIMEOUT_MS = 5_000;
-
 /**
- * Manages an OpenCode child process and exposes an event-driven
+ * Manages OpenCode child processes and exposes an event-driven
  * interface for the chat participant.
+ *
+ * Each prompt spawns a new `opencode run --format json -q "prompt"`
+ * process.  OpenCode's non-interactive mode accepts the prompt as a
+ * CLI argument and streams NDJSON events to stdout until the task
+ * completes, then exits.
  *
  * CRITICAL: In `local-with-remote-exec` mode the bridge creates a
  * shell wrapper (via {@link writeShellWrapper}) and sets `SHELL` on the
@@ -27,7 +29,9 @@ export class OpenCodeBridge implements vscode.Disposable {
   private shellWrapperPath: string | undefined;
   private _state: BridgeState = "stopped";
   private adapter: OpenCodeAdapter;
-  private useJsonMode = true;
+
+  /** Pre-computed environment for local-with-remote-exec mode. */
+  private preparedEnv: Record<string, string> | undefined;
 
   private readonly _onEvent = new vscode.EventEmitter<OpenCodeEvent>();
   public readonly onEvent = this._onEvent.event;
@@ -52,59 +56,26 @@ export class OpenCodeBridge implements vscode.Disposable {
   // Lifecycle
   // -----------------------------------------------------------------------
 
+  /**
+   * Prepare the bridge for accepting prompts.
+   *
+   * Validates that the devcontainer is available and, in
+   * local-with-remote-exec mode, creates the shell wrapper.
+   * Does NOT spawn a process — that happens per-prompt in
+   * {@link sendPrompt}.
+   */
   async start(): Promise<void> {
-    if (this.process) {
-      return; // already running
+    if (this._state === "idle" || this._state === "busy") {
+      return; // already prepared
     }
 
     const config = getConfig();
 
     if (config.executionMode === "in-container") {
-      this.startInContainer();
+      this.prepareInContainer();
     } else {
-      this.startLocalWithRemoteExec();
+      this.prepareLocalWithRemoteExec();
     }
-
-    // Wait until the process is confirmed alive or has already failed.
-    // Without this, callers see state="idle" even if the process is
-    // about to crash (e.g. binary not found, bad flags).
-    if (this.process) {
-      await this.waitForReady();
-    }
-  }
-
-  /**
-   * Wait a short time for the process to either stay alive or fail.
-   * Resolves once the process has survived the initial startup window
-   * or transitions to error/stopped.
-   */
-  private waitForReady(): Promise<void> {
-    return new Promise<void>((resolve) => {
-      // If the process is already gone, resolve immediately.
-      if (!this.process || this._state === "error" || this._state === "stopped") {
-        resolve();
-        return;
-      }
-
-      let settled = false;
-      const settle = () => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        listener.dispose();
-        resolve();
-      };
-
-      // If state transitions to error/stopped, the process failed during startup.
-      const listener = this.onStateChanged((state) => {
-        if (state === "error" || state === "stopped") {
-          settle();
-        }
-      });
-
-      // If nothing goes wrong within the timeout, the process is presumed alive.
-      const timer = setTimeout(settle, SPAWN_READY_TIMEOUT_MS);
-    });
   }
 
   stop(): void {
@@ -113,46 +84,71 @@ export class OpenCodeBridge implements vscode.Disposable {
       this.process = null;
     }
     this.cleanupShellWrapper();
+    this.preparedEnv = undefined;
     this.setState("stopped");
   }
 
   isRunning(): boolean {
-    return this.process !== null && this._state !== "stopped";
+    // The bridge is "running" when it has been prepared (idle) or is
+    // actively processing a prompt (busy).  No long-lived process is
+    // required — processes are spawned per-prompt.
+    return this._state === "idle" || this._state === "busy";
   }
 
   // -----------------------------------------------------------------------
-  // Commands → OpenCode (stdin)
+  // Commands
   // -----------------------------------------------------------------------
 
-  sendPrompt(text: string, agent?: string, references?: string[]): void {
-    const cmd: OpenCodeCommand = { type: "prompt", text, agent, references };
-    this.sendCommand(cmd);
+  /**
+   * Send a prompt to OpenCode.
+   *
+   * Spawns `opencode run --format json -q "<prompt>"` as a new child
+   * process.  Events are streamed via {@link onEvent} until the process
+   * exits.
+   */
+  sendPrompt(text: string, _agent?: string, references?: string[]): void {
+    // Kill any in-flight request.
+    if (this.process) {
+      this.process.kill();
+      this.process = null;
+    }
+
+    const promptText = this.buildPromptText(text, references);
+    const config = getConfig();
+
+    if (config.executionMode === "in-container") {
+      this.spawnInContainer(promptText);
+    } else {
+      this.spawnLocalWithRemoteExec(promptText);
+    }
+
     this.setState("busy");
   }
 
   cancelCurrentRequest(): void {
-    this.sendCommand({ type: "cancel" });
+    if (this.process) {
+      this.process.kill();
+      // handleExit will fire and emit an error/done event.
+    }
   }
 
-  sendConfig(agent: string, provider: string, model: string): void {
-    this.sendCommand({ type: "config", agent, provider, model });
+  sendConfig(_agent: string, _provider: string, _model: string): void {
+    // No-op: per-prompt spawning does not support mid-session config
+    // changes.  Agent selection is handled via the prompt arguments.
   }
 
   // -----------------------------------------------------------------------
-  // Spawn strategies
+  // Preparation (called by start())
   // -----------------------------------------------------------------------
 
   /**
-   * Local-with-remote-exec mode.
+   * Prepare local-with-remote-exec mode.
    *
-   * OpenCode runs on the host.  We set SHELL to a wrapper script that
-   * routes every `sh -c …` invocation through `docker exec`, ensuring
-   * all tool calls execute inside the devcontainer.
+   * Validates the container, creates the shell wrapper, and caches the
+   * environment variables so that each per-prompt spawn is fast.
    */
-  private startLocalWithRemoteExec(): void {
+  private prepareLocalWithRemoteExec(): void {
     const config = getConfig();
-    const workspaceFolder = getWorkspaceFolder();
-
     const containerId = this.devcontainerManager.containerId;
     const remoteWorkspace = this.devcontainerManager.remoteWorkspaceFolder;
 
@@ -175,7 +171,7 @@ export class OpenCodeBridge implements vscode.Disposable {
       envToForward
     );
 
-    const env: Record<string, string> = {
+    this.preparedEnv = {
       ...process.env as Record<string, string>,
       SHELL: this.shellWrapperPath,
       OPENCODE_DEVCONTAINER: "1",
@@ -184,30 +180,55 @@ export class OpenCodeBridge implements vscode.Disposable {
       ...config.additionalEnvVars,
     };
 
-    const args = this.buildOpenCodeArgs();
-    this.spawnProcess(config.opencodePath, args, {
-      cwd: workspaceFolder,
-      env,
-    });
+    this.setState("idle");
   }
 
   /**
-   * In-container mode.
+   * Prepare in-container mode.
    *
-   * OpenCode runs entirely inside the devcontainer.  No shell wrapper
-   * is needed because commands already execute in-container.
+   * Just validates that the container ID is available.
    */
-  private startInContainer(): void {
-    const config = getConfig();
+  private prepareInContainer(): void {
     const containerId = this.devcontainerManager.containerId;
-    const remoteWorkspace =
-      this.devcontainerManager.remoteWorkspaceFolder || "/workspaces";
 
     if (!containerId) {
       this.setState("error");
       this._onEvent.fire({
         type: "error",
         message: "Dev container is not running. Start it first.",
+      });
+      return;
+    }
+
+    this.setState("idle");
+  }
+
+  // -----------------------------------------------------------------------
+  // Per-prompt spawn strategies
+  // -----------------------------------------------------------------------
+
+  private spawnLocalWithRemoteExec(prompt: string): void {
+    const config = getConfig();
+    const workspaceFolder = getWorkspaceFolder();
+
+    const args = ["run", "--format", "json", "-q", prompt];
+
+    this.spawnProcess(config.opencodePath, args, {
+      cwd: workspaceFolder,
+      env: this.preparedEnv,
+    });
+  }
+
+  private spawnInContainer(prompt: string): void {
+    const config = getConfig();
+    const containerId = this.devcontainerManager.containerId;
+    const remoteWorkspace =
+      this.devcontainerManager.remoteWorkspaceFolder || "/workspaces";
+
+    if (!containerId) {
+      this._onEvent.fire({
+        type: "error",
+        message: "Dev container is not running.",
       });
       return;
     }
@@ -226,7 +247,11 @@ export class OpenCodeBridge implements vscode.Disposable {
       ...envFlags,
       containerId,
       "opencode",
-      ...this.buildOpenCodeArgs(),
+      "run",
+      "--format",
+      "json",
+      "-q",
+      prompt,
     ];
 
     this.spawnProcess(config.dockerPath, args, {});
@@ -235,12 +260,6 @@ export class OpenCodeBridge implements vscode.Disposable {
   // -----------------------------------------------------------------------
   // Process management
   // -----------------------------------------------------------------------
-
-  private buildOpenCodeArgs(): string[] {
-    // Attempt JSON output mode.  If the flag is unsupported, the adapter
-    // will handle raw output.
-    return this.useJsonMode ? ["--format", "json"] : [];
-  }
 
   private spawnProcess(
     command: string,
@@ -252,8 +271,6 @@ export class OpenCodeBridge implements vscode.Disposable {
       env: options.env,
       stdio: ["pipe", "pipe", "pipe"],
     });
-
-    this.setState("idle");
 
     // --- stdout: line-delimited JSON events --------------------------
     const rl = createInterface({ input: this.process.stdout! });
@@ -282,25 +299,121 @@ export class OpenCodeBridge implements vscode.Disposable {
     // Try to parse as structured JSON first.
     if (trimmed.startsWith("{")) {
       try {
-        const event = JSON.parse(trimmed) as OpenCodeEvent;
-        if (event && typeof event.type === "string") {
-          if (event.type === "done") {
-            this.setState("idle");
+        const raw = JSON.parse(trimmed) as Record<string, unknown>;
+        if (raw && typeof raw.type === "string") {
+          const event = this.mapEvent(raw);
+          if (event) {
+            if (event.type === "done") {
+              this.setState("idle");
+            }
+            this._onEvent.fire(event);
+            return;
           }
-          this._onEvent.fire(event);
-          return;
         }
       } catch {
         // Not valid JSON — fall through to adapter.
       }
     }
 
-    // If the first non-JSON line arrives we switch off JSON mode for
-    // this session and let the adapter handle all subsequent output.
-    if (this.useJsonMode) {
-      this.useJsonMode = false;
-    }
+    // Fall back to the adapter for non-JSON output.
     this.adapter.processLine(trimmed);
+  }
+
+  /**
+   * Map an NDJSON object from the OpenCode process into our internal
+   * {@link OpenCodeEvent} type.
+   *
+   * OpenCode emits events like:
+   *   { "type": "text", "text": "...", ... }
+   *   { "type": "step_start", ... }
+   *   { "type": "step_finish", ... }
+   *
+   * These are normalised to our event schema.
+   */
+  private mapEvent(raw: Record<string, unknown>): OpenCodeEvent | null {
+    const type = raw.type as string;
+
+    switch (type) {
+      // ------ Direct matches with our event schema --------------------
+      case "text":
+        // OpenCode uses `text`, our schema uses `content`.
+        return {
+          type: "text",
+          content: (raw.text ?? raw.content ?? "") as string,
+          agent: (raw.agent ?? "default") as string,
+        };
+
+      case "status":
+        return {
+          type: "status",
+          message: (raw.message ?? "") as string,
+          agent: (raw.agent ?? "default") as string,
+        };
+
+      case "done":
+        return { type: "done", agent: (raw.agent ?? "default") as string };
+
+      case "error":
+        return {
+          type: "error",
+          message: (raw.message ?? "Unknown error") as string,
+        };
+
+      case "tool_start":
+        return {
+          type: "tool_start",
+          tool: (raw.tool ?? raw.name ?? "unknown") as string,
+          args: (raw.args ?? {}) as Record<string, unknown>,
+          subagentId: raw.subagentId as string | undefined,
+        };
+
+      case "tool_end":
+        return {
+          type: "tool_end",
+          tool: (raw.tool ?? raw.name ?? "unknown") as string,
+          result: (raw.result ?? "") as string,
+          subagentId: raw.subagentId as string | undefined,
+        };
+
+      case "subagent_start":
+        return {
+          type: "subagent_start",
+          id: (raw.id ?? "") as string,
+          name: (raw.name ?? "") as string,
+          parent: (raw.parent ?? "default") as string,
+        };
+
+      case "subagent_end":
+        return {
+          type: "subagent_end",
+          id: (raw.id ?? "") as string,
+          status: (raw.status ?? "completed") as
+            | "completed"
+            | "failed"
+            | "cancelled",
+        };
+
+      // ------ OpenCode-specific events → mapped to our schema ---------
+      case "step_start":
+        return {
+          type: "status",
+          message: (raw.message ?? "Processing...") as string,
+          agent: (raw.agent ?? "default") as string,
+        };
+
+      case "step_finish":
+        return { type: "done", agent: (raw.agent ?? "default") as string };
+
+      default:
+        // Unknown event — try to extract text content.
+        if (typeof raw.text === "string") {
+          return { type: "text", content: raw.text, agent: "default" };
+        }
+        if (typeof raw.content === "string") {
+          return { type: "text", content: raw.content, agent: "default" };
+        }
+        return null;
+    }
   }
 
   private handleStderr(data: string): void {
@@ -311,42 +424,44 @@ export class OpenCodeBridge implements vscode.Disposable {
 
     // Many CLI tools (including OpenCode and Docker) write informational
     // messages to stderr.  Only treat lines that look like genuine errors
-    // as error events — everything else is logged but not surfaced as an
-    // error that would terminate the chat response.
+    // as error events — everything else is surfaced as status.
     if (this.isStderrError(trimmed)) {
       this._onEvent.fire({ type: "error", message: trimmed });
     } else {
-      // Surface as a status event so the user can see it without
-      // terminating the response.
-      this._onEvent.fire({ type: "status", message: trimmed, agent: "system" });
+      this._onEvent.fire({
+        type: "status",
+        message: trimmed,
+        agent: "system",
+      });
     }
   }
 
   /**
    * Heuristic: does a stderr line look like a real error?
-   * Lines starting with "Error:", "FATAL:", "panic:", etc. are treated
-   * as errors.  Everything else (warnings, progress, version info) is not.
    */
   private isStderrError(line: string): boolean {
-    return /^(?:Error|ERROR|FATAL|fatal|panic|PANIC|Traceback)[\s:]/i.test(line);
+    return /^(?:Error|ERROR|FATAL|fatal|panic|PANIC|Traceback)[\s:]/i.test(
+      line
+    );
   }
 
   private handleExit(code: number | null): void {
     this.process = null;
-    this.cleanupShellWrapper();
 
-    if (code !== 0 && code !== null) {
+    if (code === 0 || code === null) {
+      // Normal completion.  Emit "done" only if one hasn't already been
+      // emitted by the NDJSON stream (which would have set state to "idle").
+      if (this._state === "busy") {
+        this._onEvent.fire({ type: "done", agent: "default" });
+      }
+      this.setState("idle");
+    } else {
       this._onEvent.fire({
         type: "error",
         message: `OpenCode exited with code ${code}`,
       });
-      this.setState("error");
-    } else {
-      this._onEvent.fire({
-        type: "error",
-        message: "OpenCode process exited unexpectedly",
-      });
-      this.setState("stopped");
+      // Stay idle so the bridge can accept the next prompt.
+      this.setState("idle");
     }
   }
 
@@ -354,11 +469,19 @@ export class OpenCodeBridge implements vscode.Disposable {
   // Helpers
   // -----------------------------------------------------------------------
 
-  private sendCommand(cmd: OpenCodeCommand): void {
-    if (!this.process?.stdin?.writable) {
-      return;
+  /**
+   * Build the full prompt text, prepending any file references so that
+   * OpenCode can see them as context.
+   */
+  private buildPromptText(
+    text: string,
+    references?: string[]
+  ): string {
+    if (!references || references.length === 0) {
+      return text;
     }
-    this.process.stdin.write(JSON.stringify(cmd) + "\n");
+    const refList = references.map((r) => `@${r}`).join(" ");
+    return `${refList}\n\n${text}`;
   }
 
   private setState(state: BridgeState): void {

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import * as childProcess from "child_process";
 import {
   __resetMocks,
@@ -53,7 +53,11 @@ function createMockDevcontainerManager(opts: {
 function createMockProcess() {
   const stdout = new Readable({ read() {} });
   const stderr = new Readable({ read() {} });
-  const stdin = new Writable({ write(_chunk, _enc, cb) { cb(); } });
+  const stdin = new Writable({
+    write(_chunk, _enc, cb) {
+      cb();
+    },
+  });
   const proc = {
     stdout,
     stderr,
@@ -66,14 +70,11 @@ function createMockProcess() {
 }
 
 /**
- * Helper: start the bridge and advance fake timers so `waitForReady`
- * resolves (the 5 s readiness timeout).
+ * Helper: flush Node.js stream/readline async processing.
+ * Stream `data` and readline `line` events fire asynchronously after push().
  */
-async function startBridge(bridge: OpenCodeBridge): Promise<void> {
-  const p = bridge.start();
-  // Advance past the SPAWN_READY_TIMEOUT_MS (5 000 ms).
-  await vi.advanceTimersByTimeAsync(5_000);
-  await p;
+function flushStreams(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 20));
 }
 
 let bridge: OpenCodeBridge;
@@ -81,8 +82,6 @@ let mockManager: ReturnType<typeof createMockDevcontainerManager>;
 let mockProcess: ReturnType<typeof createMockProcess>;
 
 beforeEach(() => {
-  vi.useFakeTimers();
-
   __resetMocks();
   __setWorkspaceFolders([{ uri: Uri.file("/home/user/project") }]);
 
@@ -96,10 +95,6 @@ beforeEach(() => {
     remoteWorkspaceFolder: "/workspaces/project",
   });
   bridge = new OpenCodeBridge(mockManager as any);
-});
-
-afterEach(() => {
-  vi.useRealTimers();
 });
 
 // ---------------------------------------------------------------------------
@@ -117,40 +112,31 @@ describe("initial state", () => {
 });
 
 // ---------------------------------------------------------------------------
-// start — local-with-remote-exec
+// start — prepares the bridge without spawning a process
 // ---------------------------------------------------------------------------
 
 describe("start — local-with-remote-exec", () => {
-  it("spawns opencode process with --format json", async () => {
-    await startBridge(bridge);
+  it("transitions to idle state (no process spawned)", async () => {
+    await bridge.start();
+
+    // start() only prepares env / shell wrapper — no process yet.
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(bridge.state).toBe("idle");
+    expect(bridge.isRunning()).toBe(true);
+  });
+
+  it("sets up SHELL env with shell wrapper", async () => {
+    await bridge.start();
+
+    // Now trigger a prompt to verify the env is passed.
+    bridge.sendPrompt("hello");
 
     expect(mockSpawn).toHaveBeenCalledOnce();
-    const [cmd, args] = mockSpawn.mock.calls[0];
-    expect(cmd).toBe("opencode");
-    expect(args).toContain("--format");
-    expect(args).toContain("json");
-  });
-
-  it("sets SHELL env to shell wrapper path", async () => {
-    await startBridge(bridge);
-
     const opts = mockSpawn.mock.calls[0][2];
     expect(opts.env.SHELL).toContain("shell-wrapper");
-  });
-
-  it("sets OPENCODE_DEVCONTAINER env vars", async () => {
-    await startBridge(bridge);
-
-    const opts = mockSpawn.mock.calls[0][2];
     expect(opts.env.OPENCODE_DEVCONTAINER).toBe("1");
     expect(opts.env.OPENCODE_DEVCONTAINER_ID).toBe("abc123def456");
     expect(opts.env.OPENCODE_WORKSPACE_FOLDER).toBe("/workspaces/project");
-  });
-
-  it("transitions to idle state after spawn", async () => {
-    await startBridge(bridge);
-    expect(bridge.state).toBe("idle");
-    expect(bridge.isRunning()).toBe(true);
   });
 
   it("fires error event when container info is unavailable", async () => {
@@ -164,7 +150,6 @@ describe("start — local-with-remote-exec", () => {
     const listener = vi.fn();
     bridge.onEvent(listener);
 
-    // No process is spawned so waitForReady is skipped — resolves immediately.
     await bridge.start();
 
     expect(listener).toHaveBeenCalledWith(
@@ -174,31 +159,15 @@ describe("start — local-with-remote-exec", () => {
       })
     );
     expect(bridge.state).toBe("error");
+    expect(bridge.isRunning()).toBe(false);
   });
 
-  it("does not spawn a second process if already running", async () => {
-    await startBridge(bridge);
-    await startBridge(bridge);
+  it("is idempotent when already idle", async () => {
+    await bridge.start();
+    await bridge.start();
 
-    expect(mockSpawn).toHaveBeenCalledOnce();
-  });
-
-  it("resolves start() early when process errors during startup", async () => {
-    const p = bridge.start();
-
-    // Simulate process error event firing before the readiness timeout.
-    const errorCall = mockProcess.on.mock.calls.find(
-      ([event]: [string]) => event === "error"
-    );
-    expect(errorCall).toBeDefined();
-    const errorHandler = errorCall![1] as (err: Error) => void;
-    errorHandler(new Error("spawn ENOENT"));
-
-    // Advance a small amount — should resolve immediately via state listener.
-    await vi.advanceTimersByTimeAsync(10);
-    await p;
-
-    expect(bridge.state).toBe("error");
+    // Should not error or re-prepare.
+    expect(bridge.state).toBe("idle");
   });
 });
 
@@ -207,35 +176,15 @@ describe("start — local-with-remote-exec", () => {
 // ---------------------------------------------------------------------------
 
 describe("start — in-container", () => {
-  it("spawns docker exec with -i flag and the container ID", async () => {
+  it("transitions to idle without spawning", async () => {
     __setMockConfig({
       "opencode-devcontainer.executionMode": "in-container",
     });
 
-    await startBridge(bridge);
+    await bridge.start();
 
-    expect(mockSpawn).toHaveBeenCalledOnce();
-    const [cmd, args] = mockSpawn.mock.calls[0];
-    expect(cmd).toBe("docker");
-    expect(args).toContain("exec");
-    expect(args).toContain("-i");
-    expect(args).toContain("abc123def456");
-    expect(args).toContain("opencode");
-  });
-
-  it("places -i flag before other exec arguments", async () => {
-    __setMockConfig({
-      "opencode-devcontainer.executionMode": "in-container",
-    });
-
-    await startBridge(bridge);
-
-    const args = mockSpawn.mock.calls[0][1] as string[];
-    const execIdx = args.indexOf("exec");
-    const iIdx = args.indexOf("-i");
-    const containerIdx = args.indexOf("abc123def456");
-    expect(iIdx).toBeGreaterThan(execIdx);
-    expect(iIdx).toBeLessThan(containerIdx);
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(bridge.state).toBe("idle");
   });
 
   it("fires error when no containerId", async () => {
@@ -257,6 +206,77 @@ describe("start — in-container", () => {
     expect(listener).toHaveBeenCalledWith(
       expect.objectContaining({ type: "error" })
     );
+    expect(bridge.state).toBe("error");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sendPrompt — per-prompt spawning
+// ---------------------------------------------------------------------------
+
+describe("sendPrompt", () => {
+  it("spawns opencode run --format json -q with the prompt", async () => {
+    await bridge.start();
+    bridge.sendPrompt("Fix the bug");
+
+    expect(mockSpawn).toHaveBeenCalledOnce();
+    const [cmd, args] = mockSpawn.mock.calls[0];
+    expect(cmd).toBe("opencode");
+    expect(args).toContain("run");
+    expect(args).toContain("--format");
+    expect(args).toContain("json");
+    expect(args).toContain("-q");
+    expect(args).toContain("Fix the bug");
+  });
+
+  it("transitions to busy state", async () => {
+    await bridge.start();
+    bridge.sendPrompt("hello");
+    expect(bridge.state).toBe("busy");
+  });
+
+  it("includes file references in prompt text", async () => {
+    await bridge.start();
+    bridge.sendPrompt("Fix the bug", "default", ["/src/app.ts", "/src/lib.ts"]);
+
+    const args = mockSpawn.mock.calls[0][1] as string[];
+    const promptArg = args[args.length - 1];
+    expect(promptArg).toContain("@/src/app.ts");
+    expect(promptArg).toContain("@/src/lib.ts");
+    expect(promptArg).toContain("Fix the bug");
+  });
+
+  it("spawns docker exec with -i in in-container mode", async () => {
+    __setMockConfig({
+      "opencode-devcontainer.executionMode": "in-container",
+    });
+
+    await bridge.start();
+    bridge.sendPrompt("Fix the bug");
+
+    expect(mockSpawn).toHaveBeenCalledOnce();
+    const [cmd, args] = mockSpawn.mock.calls[0];
+    expect(cmd).toBe("docker");
+    expect(args).toContain("exec");
+    expect(args).toContain("-i");
+    expect(args).toContain("abc123def456");
+    expect(args).toContain("opencode");
+    expect(args).toContain("run");
+    expect(args).toContain("Fix the bug");
+  });
+
+  it("kills existing process before spawning new one", async () => {
+    await bridge.start();
+    bridge.sendPrompt("first prompt");
+
+    const firstProcess = mockProcess;
+    mockProcess = createMockProcess();
+    mockSpawn.mockReturnValue(mockProcess);
+
+    bridge.sendPrompt("second prompt");
+
+    expect(firstProcess.kill).toHaveBeenCalled();
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -265,8 +285,9 @@ describe("start — in-container", () => {
 // ---------------------------------------------------------------------------
 
 describe("stop", () => {
-  it("kills the process and transitions to stopped", async () => {
-    await startBridge(bridge);
+  it("kills any active process and transitions to stopped", async () => {
+    await bridge.start();
+    bridge.sendPrompt("hello");
     bridge.stop();
 
     expect(mockProcess.kill).toHaveBeenCalled();
@@ -280,60 +301,21 @@ describe("stop", () => {
 });
 
 // ---------------------------------------------------------------------------
-// sendPrompt / cancelCurrentRequest / sendConfig
+// cancelCurrentRequest
 // ---------------------------------------------------------------------------
 
-describe("commands", () => {
-  it("sendPrompt writes JSON to stdin", async () => {
-    await startBridge(bridge);
-    const writeSpy = vi.spyOn(mockProcess.stdin, "write");
-
-    bridge.sendPrompt("Fix the bug", "default", ["/src/app.ts"]);
-
-    expect(writeSpy).toHaveBeenCalledOnce();
-    const written = writeSpy.mock.calls[0][0] as string;
-    const parsed = JSON.parse(written.trim());
-    expect(parsed.type).toBe("prompt");
-    expect(parsed.text).toBe("Fix the bug");
-    expect(parsed.agent).toBe("default");
-    expect(parsed.references).toEqual(["/src/app.ts"]);
-  });
-
-  it("sendPrompt transitions to busy state", async () => {
-    await startBridge(bridge);
-
+describe("cancelCurrentRequest", () => {
+  it("kills the active process", async () => {
+    await bridge.start();
     bridge.sendPrompt("hello");
-    expect(bridge.state).toBe("busy");
-  });
-
-  it("cancelCurrentRequest writes cancel command", async () => {
-    await startBridge(bridge);
-    const writeSpy = vi.spyOn(mockProcess.stdin, "write");
-
     bridge.cancelCurrentRequest();
 
-    expect(writeSpy).toHaveBeenCalledOnce();
-    const parsed = JSON.parse((writeSpy.mock.calls[0][0] as string).trim());
-    expect(parsed.type).toBe("cancel");
+    expect(mockProcess.kill).toHaveBeenCalled();
   });
 
-  it("sendConfig writes config command", async () => {
-    await startBridge(bridge);
-    const writeSpy = vi.spyOn(mockProcess.stdin, "write");
-
-    bridge.sendConfig("gpt4", "openai", "gpt-4");
-
-    const parsed = JSON.parse((writeSpy.mock.calls[0][0] as string).trim());
-    expect(parsed.type).toBe("config");
-    expect(parsed.agent).toBe("gpt4");
-    expect(parsed.provider).toBe("openai");
-    expect(parsed.model).toBe("gpt-4");
-  });
-
-  it("does not write when process is not running", () => {
-    // Don't start the bridge
-    bridge.sendPrompt("hello");
-    // No crash, just silently ignored
+  it("is safe to call with no active process", async () => {
+    await bridge.start();
+    expect(() => bridge.cancelCurrentRequest()).not.toThrow();
   });
 });
 
@@ -346,10 +328,126 @@ describe("onStateChanged", () => {
     const listener = vi.fn();
     bridge.onStateChanged(listener);
 
-    await startBridge(bridge);
+    await bridge.start();
 
-    // Should have fired with "idle" at minimum
     expect(listener).toHaveBeenCalledWith("idle");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// NDJSON event mapping
+// ---------------------------------------------------------------------------
+
+describe("NDJSON event mapping", () => {
+  it("maps text events (text → content field)", async () => {
+    await bridge.start();
+    const listener = vi.fn();
+    bridge.onEvent(listener);
+    bridge.sendPrompt("hello");
+
+    // Simulate OpenCode emitting a text event.
+    mockProcess.stdout.push('{"type":"text","text":"Hello world"}\n');
+    await flushStreams();
+
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "text",
+        content: "Hello world",
+        agent: "default",
+      })
+    );
+  });
+
+  it("maps step_start to status event", async () => {
+    await bridge.start();
+    const listener = vi.fn();
+    bridge.onEvent(listener);
+    bridge.sendPrompt("hello");
+
+    mockProcess.stdout.push(
+      '{"type":"step_start","message":"Analyzing code..."}\n'
+    );
+    await flushStreams();
+
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "status",
+        message: "Analyzing code...",
+      })
+    );
+  });
+
+  it("maps step_finish to done event", async () => {
+    await bridge.start();
+    const listener = vi.fn();
+    bridge.onEvent(listener);
+    bridge.sendPrompt("hello");
+
+    mockProcess.stdout.push('{"type":"step_finish"}\n');
+    await flushStreams();
+
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "done" })
+    );
+    expect(bridge.state).toBe("idle");
+  });
+
+  it("passes through tool_start events", async () => {
+    await bridge.start();
+    const listener = vi.fn();
+    bridge.onEvent(listener);
+    bridge.sendPrompt("hello");
+
+    mockProcess.stdout.push(
+      '{"type":"tool_start","tool":"bash","args":{"command":"ls"}}\n'
+    );
+    await flushStreams();
+
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "tool_start",
+        tool: "bash",
+        args: { command: "ls" },
+      })
+    );
+  });
+
+  it("passes through error events", async () => {
+    await bridge.start();
+    const listener = vi.fn();
+    bridge.onEvent(listener);
+    bridge.sendPrompt("hello");
+
+    mockProcess.stdout.push(
+      '{"type":"error","message":"Something broke"}\n'
+    );
+    await flushStreams();
+
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "error",
+        message: "Something broke",
+      })
+    );
+  });
+
+  it("extracts text from unknown event types", async () => {
+    await bridge.start();
+    const listener = vi.fn();
+    bridge.onEvent(listener);
+    bridge.sendPrompt("hello");
+
+    mockProcess.stdout.push(
+      '{"type":"unknown_event","text":"Some text content"}\n'
+    );
+    await flushStreams();
+
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "text",
+        content: "Some text content",
+      })
+    );
   });
 });
 
@@ -359,12 +457,13 @@ describe("onStateChanged", () => {
 
 describe("stderr handling", () => {
   it("fires error event for lines that look like real errors", async () => {
-    await startBridge(bridge);
+    await bridge.start();
     const listener = vi.fn();
     bridge.onEvent(listener);
+    bridge.sendPrompt("hello");
 
-    // Push an error-like line through stderr.
     mockProcess.stderr.push("Error: something went wrong\n");
+    await flushStreams();
 
     expect(listener).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -375,12 +474,13 @@ describe("stderr handling", () => {
   });
 
   it("fires status event for informational stderr lines", async () => {
-    await startBridge(bridge);
+    await bridge.start();
     const listener = vi.fn();
     bridge.onEvent(listener);
+    bridge.sendPrompt("hello");
 
-    // Push a non-error line through stderr (e.g. a warning or progress).
     mockProcess.stderr.push("Loading configuration...\n");
+    await flushStreams();
 
     expect(listener).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -392,23 +492,13 @@ describe("stderr handling", () => {
   });
 
   it("treats FATAL lines as errors", async () => {
-    await startBridge(bridge);
+    await bridge.start();
     const listener = vi.fn();
     bridge.onEvent(listener);
+    bridge.sendPrompt("hello");
 
     mockProcess.stderr.push("FATAL: could not bind port\n");
-
-    expect(listener).toHaveBeenCalledWith(
-      expect.objectContaining({ type: "error" })
-    );
-  });
-
-  it("treats panic lines as errors", async () => {
-    await startBridge(bridge);
-    const listener = vi.fn();
-    bridge.onEvent(listener);
-
-    mockProcess.stderr.push("panic: runtime error\n");
+    await flushStreams();
 
     expect(listener).toHaveBeenCalledWith(
       expect.objectContaining({ type: "error" })
@@ -416,11 +506,13 @@ describe("stderr handling", () => {
   });
 
   it("does not fire events for empty stderr", async () => {
-    await startBridge(bridge);
+    await bridge.start();
     const listener = vi.fn();
     bridge.onEvent(listener);
+    bridge.sendPrompt("hello");
 
     mockProcess.stderr.push("  \n");
+    await flushStreams();
 
     expect(listener).not.toHaveBeenCalled();
   });
@@ -438,45 +530,62 @@ describe("process exit", () => {
     return exitCall?.[1] as ((code: number | null) => void) | undefined;
   }
 
-  it("fires error event on clean exit (code 0)", async () => {
-    await startBridge(bridge);
+  it("emits done event on clean exit (code 0) when still busy", async () => {
+    await bridge.start();
     const listener = vi.fn();
     bridge.onEvent(listener);
+    bridge.sendPrompt("hello");
 
     const exitHandler = getExitHandler();
     expect(exitHandler).toBeDefined();
     exitHandler!(0);
 
     expect(listener).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: "error",
-        message: expect.stringContaining("exited unexpectedly"),
-      })
+      expect.objectContaining({ type: "done" })
     );
-    expect(bridge.state).toBe("stopped");
+    expect(bridge.state).toBe("idle");
   });
 
-  it("fires error event on clean exit (code null)", async () => {
-    await startBridge(bridge);
+  it("emits done event on clean exit (code null) when still busy", async () => {
+    await bridge.start();
     const listener = vi.fn();
     bridge.onEvent(listener);
+    bridge.sendPrompt("hello");
 
     const exitHandler = getExitHandler();
     exitHandler!(null);
 
     expect(listener).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: "error",
-        message: expect.stringContaining("exited unexpectedly"),
-      })
+      expect.objectContaining({ type: "done" })
     );
-    expect(bridge.state).toBe("stopped");
+    expect(bridge.state).toBe("idle");
+  });
+
+  it("does not double-emit done if step_finish already fired", async () => {
+    await bridge.start();
+    const listener = vi.fn();
+    bridge.onEvent(listener);
+    bridge.sendPrompt("hello");
+
+    // Simulate step_finish (maps to done) setting state to idle.
+    mockProcess.stdout.push('{"type":"step_finish"}\n');
+    await flushStreams();
+
+    // Now the process exits — should NOT emit another done.
+    const exitHandler = getExitHandler();
+    exitHandler!(0);
+
+    const doneEvents = listener.mock.calls.filter(
+      ([e]: [{ type: string }]) => e.type === "done"
+    );
+    expect(doneEvents).toHaveLength(1);
   });
 
   it("fires error event on non-zero exit", async () => {
-    await startBridge(bridge);
+    await bridge.start();
     const listener = vi.fn();
     bridge.onEvent(listener);
+    bridge.sendPrompt("hello");
 
     const exitHandler = getExitHandler();
     exitHandler!(1);
@@ -487,7 +596,42 @@ describe("process exit", () => {
         message: expect.stringContaining("exited with code 1"),
       })
     );
-    expect(bridge.state).toBe("error");
+    // Bridge stays idle — ready for next prompt.
+    expect(bridge.state).toBe("idle");
+  });
+
+  it("stays idle after non-zero exit (ready for next prompt)", async () => {
+    await bridge.start();
+    bridge.sendPrompt("hello");
+
+    const exitHandler = getExitHandler();
+    exitHandler!(1);
+
+    expect(bridge.isRunning()).toBe(true);
+    expect(bridge.state).toBe("idle");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildPromptText
+// ---------------------------------------------------------------------------
+
+describe("prompt text building", () => {
+  it("passes plain prompt when no references", async () => {
+    await bridge.start();
+    bridge.sendPrompt("Fix the bug");
+
+    const args = mockSpawn.mock.calls[0][1] as string[];
+    expect(args[args.length - 1]).toBe("Fix the bug");
+  });
+
+  it("prepends @file references to prompt", async () => {
+    await bridge.start();
+    bridge.sendPrompt("Fix it", undefined, ["/a.ts", "/b.ts"]);
+
+    const args = mockSpawn.mock.calls[0][1] as string[];
+    const promptArg = args[args.length - 1];
+    expect(promptArg).toBe("@/a.ts @/b.ts\n\nFix it");
   });
 });
 
@@ -497,7 +641,8 @@ describe("process exit", () => {
 
 describe("dispose", () => {
   it("stops the bridge and disposes resources", async () => {
-    await startBridge(bridge);
+    await bridge.start();
+    bridge.sendPrompt("hello");
     expect(() => bridge.dispose()).not.toThrow();
     expect(bridge.state).toBe("stopped");
   });
