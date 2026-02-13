@@ -1,9 +1,8 @@
 /**
  * Shared types for the chat subsystem.
  *
- * Defines the line-delimited JSON protocol between the VS Code chat
- * participant and the OpenCode process, plus data structures for
- * tracking agent and subagent activity.
+ * Defines the NDJSON event schema emitted by the OpenCode process,
+ * plus data structures for tracking agent and subagent activity.
  */
 
 // ---------------------------------------------------------------------------
@@ -32,15 +31,6 @@ export type OpenCodeEvent =
   | { type: "subagent_end"; id: string; status: "completed" | "failed" | "cancelled" }
   | { type: "done"; agent: string }
   | { type: "error"; message: string };
-
-// ---------------------------------------------------------------------------
-// Commands TO OpenCode (stdin, one JSON object per line)
-// ---------------------------------------------------------------------------
-
-export type OpenCodeCommand =
-  | { type: "prompt"; text: string; agent?: string; references?: string[] }
-  | { type: "cancel" }
-  | { type: "config"; agent: string; provider: string; model: string };
 
 // ---------------------------------------------------------------------------
 // Subagent / tool-call tracking
