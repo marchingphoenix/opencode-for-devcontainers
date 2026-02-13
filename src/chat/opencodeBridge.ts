@@ -9,6 +9,9 @@ import { OpenCodeAdapter } from "./opencodeAdapter";
 
 export type BridgeState = "idle" | "busy" | "error" | "stopped";
 
+/** Maximum time (ms) to wait for the process to become ready after spawn. */
+const SPAWN_READY_TIMEOUT_MS = 5_000;
+
 /**
  * Manages an OpenCode child process and exposes an event-driven
  * interface for the chat participant.
@@ -61,6 +64,47 @@ export class OpenCodeBridge implements vscode.Disposable {
     } else {
       this.startLocalWithRemoteExec();
     }
+
+    // Wait until the process is confirmed alive or has already failed.
+    // Without this, callers see state="idle" even if the process is
+    // about to crash (e.g. binary not found, bad flags).
+    if (this.process) {
+      await this.waitForReady();
+    }
+  }
+
+  /**
+   * Wait a short time for the process to either stay alive or fail.
+   * Resolves once the process has survived the initial startup window
+   * or transitions to error/stopped.
+   */
+  private waitForReady(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      // If the process is already gone, resolve immediately.
+      if (!this.process || this._state === "error" || this._state === "stopped") {
+        resolve();
+        return;
+      }
+
+      let settled = false;
+      const settle = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        listener.dispose();
+        resolve();
+      };
+
+      // If state transitions to error/stopped, the process failed during startup.
+      const listener = this.onStateChanged((state) => {
+        if (state === "error" || state === "stopped") {
+          settle();
+        }
+      });
+
+      // If nothing goes wrong within the timeout, the process is presumed alive.
+      const timer = setTimeout(settle, SPAWN_READY_TIMEOUT_MS);
+    });
   }
 
   stop(): void {
@@ -176,6 +220,7 @@ export class OpenCodeBridge implements vscode.Disposable {
 
     const args = [
       "exec",
+      "-i",
       "-w",
       remoteWorkspace,
       ...envFlags,
@@ -260,9 +305,30 @@ export class OpenCodeBridge implements vscode.Disposable {
 
   private handleStderr(data: string): void {
     const trimmed = data.trim();
-    if (trimmed) {
-      this._onEvent.fire({ type: "error", message: trimmed });
+    if (!trimmed) {
+      return;
     }
+
+    // Many CLI tools (including OpenCode and Docker) write informational
+    // messages to stderr.  Only treat lines that look like genuine errors
+    // as error events — everything else is logged but not surfaced as an
+    // error that would terminate the chat response.
+    if (this.isStderrError(trimmed)) {
+      this._onEvent.fire({ type: "error", message: trimmed });
+    } else {
+      // Surface as a status event so the user can see it without
+      // terminating the response.
+      this._onEvent.fire({ type: "status", message: trimmed, agent: "system" });
+    }
+  }
+
+  /**
+   * Heuristic: does a stderr line look like a real error?
+   * Lines starting with "Error:", "FATAL:", "panic:", etc. are treated
+   * as errors.  Everything else (warnings, progress, version info) is not.
+   */
+  private isStderrError(line: string): boolean {
+    return /^(?:Error|ERROR|FATAL|fatal|panic|PANIC|Traceback)[\s:]/i.test(line);
   }
 
   private handleExit(code: number | null): void {

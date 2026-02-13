@@ -186,18 +186,22 @@ async function handleAsk(
     })
     .filter((r): r is string => r !== undefined);
 
-  // Send the prompt.
-  bridge.sendPrompt(prompt, agent.id, references);
-
   // Wait for the response to complete (or cancellation).
+  // IMPORTANT: Register listeners BEFORE sending the prompt to avoid
+  // missing events if the process responds or errors quickly.
   return new Promise<vscode.ChatResult>((resolve) => {
     let completed = false;
+    let responseTimeout: ReturnType<typeof setTimeout> | undefined;
 
     const finish = (meta: Record<string, unknown>) => {
       if (completed) {
         return;
       }
       completed = true;
+      if (responseTimeout) {
+        clearTimeout(responseTimeout);
+        responseTimeout = undefined;
+      }
       eventListener.dispose();
       stateListener.dispose();
       cancelListener.dispose();
@@ -210,6 +214,12 @@ async function handleAsk(
     };
 
     const eventListener = bridge.onEvent((event: OpenCodeEvent) => {
+      // Any event from the bridge resets the timeout — the process is alive.
+      if (responseTimeout) {
+        clearTimeout(responseTimeout);
+        responseTimeout = undefined;
+      }
+
       // Feed every event to the subagent tracker.
       subagentTracker.handleEvent(event);
 
@@ -238,6 +248,22 @@ async function handleAsk(
       stream.markdown("\n_Request cancelled._\n");
       finish({ cancelled: true });
     });
+
+    // Now that listeners are attached, send the prompt.
+    bridge.sendPrompt(prompt, agent.id, references);
+
+    // Start a connection timeout — if no events arrive within 30 seconds
+    // the process is likely hung or not responding to the protocol.
+    responseTimeout = setTimeout(() => {
+      if (!completed) {
+        stream.markdown(
+          "\n\n_No response from OpenCode within 30 seconds. " +
+          "The process may not support the expected protocol. " +
+          "Check that OpenCode is installed and up to date._\n"
+        );
+        finish({ error: "connection_timeout" });
+      }
+    }, 30_000);
   });
 }
 
