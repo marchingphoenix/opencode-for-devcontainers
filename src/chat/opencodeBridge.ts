@@ -276,6 +276,10 @@ export class OpenCodeBridge implements vscode.Disposable {
       });
       this.setState("error");
     } else {
+      this._onEvent.fire({
+        type: "error",
+        message: "OpenCode process exited unexpectedly",
+      });
       this.setState("stopped");
     }
   }
