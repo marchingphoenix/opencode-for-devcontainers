@@ -302,6 +302,71 @@ describe("onStateChanged", () => {
 });
 
 // ---------------------------------------------------------------------------
+// process exit — event notification
+// ---------------------------------------------------------------------------
+
+describe("process exit", () => {
+  function getExitHandler() {
+    const exitCall = mockProcess.on.mock.calls.find(
+      ([event]: [string]) => event === "exit"
+    );
+    return exitCall?.[1] as ((code: number | null) => void) | undefined;
+  }
+
+  it("fires error event on clean exit (code 0)", async () => {
+    await bridge.start();
+    const listener = vi.fn();
+    bridge.onEvent(listener);
+
+    const exitHandler = getExitHandler();
+    expect(exitHandler).toBeDefined();
+    exitHandler!(0);
+
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "error",
+        message: expect.stringContaining("exited unexpectedly"),
+      })
+    );
+    expect(bridge.state).toBe("stopped");
+  });
+
+  it("fires error event on clean exit (code null)", async () => {
+    await bridge.start();
+    const listener = vi.fn();
+    bridge.onEvent(listener);
+
+    const exitHandler = getExitHandler();
+    exitHandler!(null);
+
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "error",
+        message: expect.stringContaining("exited unexpectedly"),
+      })
+    );
+    expect(bridge.state).toBe("stopped");
+  });
+
+  it("fires error event on non-zero exit", async () => {
+    await bridge.start();
+    const listener = vi.fn();
+    bridge.onEvent(listener);
+
+    const exitHandler = getExitHandler();
+    exitHandler!(1);
+
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "error",
+        message: expect.stringContaining("exited with code 1"),
+      })
+    );
+    expect(bridge.state).toBe("error");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // dispose
 // ---------------------------------------------------------------------------
 

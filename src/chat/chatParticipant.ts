@@ -199,6 +199,7 @@ async function handleAsk(
       }
       completed = true;
       eventListener.dispose();
+      stateListener.dispose();
       cancelListener.dispose();
 
       // Render subagent summary.
@@ -220,6 +221,15 @@ async function handleAsk(
       }
       if (event.type === "error") {
         finish({ error: event.message });
+      }
+    });
+
+    // Safety net: if the bridge stops or errors without emitting an
+    // event (e.g. process killed externally), resolve the promise so
+    // the chat response doesn't hang indefinitely.
+    const stateListener = bridge.onStateChanged((state) => {
+      if (state === "stopped" || state === "error") {
+        finish({ error: "OpenCode process exited unexpectedly" });
       }
     });
 
