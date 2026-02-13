@@ -100,6 +100,11 @@
           "default": "devcontainer",
           "description": "Path to the devcontainer CLI binary"
         },
+        "opencode-devcontainer.opencodeConfigPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the OpenCode configuration file (opencode.json or opencode.jsonc). When empty, searches the workspace root and ~/.config/opencode/ automatically."
+        },
         "opencode-devcontainer.executionMode": {
           "type": "string",
           "enum": [

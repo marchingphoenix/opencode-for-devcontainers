@@ -1,21 +1,29 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import {
   readOpenCodeConfig,
   readMarkdownAgents,
   loadAgentsFromOpenCodeConfig,
+  resolveConfigSearchPaths,
 } from "./opencodeConfigReader";
 
 vi.mock("fs");
+vi.mock("os", async (importOriginal) => {
+  const actual = await importOriginal<typeof os>();
+  return { ...actual, homedir: vi.fn(() => "/home/testuser") };
+});
 
 const mockReadFileSync = vi.mocked(fs.readFileSync);
 const mockReaddirSync = vi.mocked(fs.readdirSync);
+const mockHomedir = vi.mocked(os.homedir);
 
 const WORKSPACE = "/fake/workspace";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockHomedir.mockReturnValue("/home/testuser");
   // By default, all file reads throw ENOENT.
   mockReadFileSync.mockImplementation(() => {
     const err = new Error("ENOENT") as NodeJS.ErrnoException;
@@ -30,15 +38,60 @@ beforeEach(() => {
 });
 
 // ---------------------------------------------------------------------------
+// resolveConfigSearchPaths
+// ---------------------------------------------------------------------------
+
+describe("resolveConfigSearchPaths", () => {
+  it("includes only global config when no custom path or workspace", () => {
+    const paths = resolveConfigSearchPaths("", undefined);
+    expect(paths).toEqual(["/home/testuser/.config/opencode"]);
+  });
+
+  it("includes workspace root before global config", () => {
+    const paths = resolveConfigSearchPaths("", WORKSPACE);
+    expect(paths).toEqual([
+      WORKSPACE,
+      "/home/testuser/.config/opencode",
+    ]);
+  });
+
+  it("includes custom path first", () => {
+    const paths = resolveConfigSearchPaths("/custom/path", WORKSPACE);
+    expect(paths).toEqual([
+      "/custom/path",
+      WORKSPACE,
+      "/home/testuser/.config/opencode",
+    ]);
+  });
+
+  it("expands ~ in custom path", () => {
+    const paths = resolveConfigSearchPaths("~/my-config", WORKSPACE);
+    expect(paths).toEqual([
+      "/home/testuser/my-config",
+      WORKSPACE,
+      "/home/testuser/.config/opencode",
+    ]);
+  });
+
+  it("handles direct file path with ~ expansion", () => {
+    const paths = resolveConfigSearchPaths("~/opencode.json", undefined);
+    expect(paths).toEqual([
+      "/home/testuser/opencode.json",
+      "/home/testuser/.config/opencode",
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // readOpenCodeConfig
 // ---------------------------------------------------------------------------
 
 describe("readOpenCodeConfig", () => {
   it("returns undefined when no config file exists", () => {
-    expect(readOpenCodeConfig(WORKSPACE)).toBeUndefined();
+    expect(readOpenCodeConfig([WORKSPACE])).toBeUndefined();
   });
 
-  it("reads opencode.jsonc first", () => {
+  it("reads opencode.jsonc first in a directory", () => {
     mockReadFileSync.mockImplementation((filePath) => {
       if (String(filePath) === path.join(WORKSPACE, "opencode.jsonc")) {
         return '{ "default_agent": "plan" }';
@@ -46,12 +99,12 @@ describe("readOpenCodeConfig", () => {
       throw new Error("ENOENT");
     });
 
-    const config = readOpenCodeConfig(WORKSPACE);
+    const config = readOpenCodeConfig([WORKSPACE]);
     expect(config).toBeDefined();
     expect(config!.default_agent).toBe("plan");
   });
 
-  it("falls back to opencode.json", () => {
+  it("falls back to opencode.json in a directory", () => {
     mockReadFileSync.mockImplementation((filePath) => {
       if (String(filePath) === path.join(WORKSPACE, "opencode.json")) {
         return '{ "default_agent": "build" }';
@@ -59,9 +112,51 @@ describe("readOpenCodeConfig", () => {
       throw new Error("ENOENT");
     });
 
-    const config = readOpenCodeConfig(WORKSPACE);
+    const config = readOpenCodeConfig([WORKSPACE]);
     expect(config).toBeDefined();
     expect(config!.default_agent).toBe("build");
+  });
+
+  it("reads a direct file path", () => {
+    mockReadFileSync.mockImplementation((filePath) => {
+      if (String(filePath) === "/custom/opencode.json") {
+        return '{ "default_agent": "plan" }';
+      }
+      throw new Error("ENOENT");
+    });
+
+    const config = readOpenCodeConfig(["/custom/opencode.json"]);
+    expect(config).toBeDefined();
+    expect(config!.default_agent).toBe("plan");
+  });
+
+  it("searches paths in order and returns first match", () => {
+    mockReadFileSync.mockImplementation((filePath) => {
+      if (String(filePath) === "/first/opencode.json") {
+        return '{ "default_agent": "from-first" }';
+      }
+      if (String(filePath) === "/second/opencode.json") {
+        return '{ "default_agent": "from-second" }';
+      }
+      throw new Error("ENOENT");
+    });
+
+    const config = readOpenCodeConfig(["/first", "/second"]);
+    expect(config).toBeDefined();
+    expect(config!.default_agent).toBe("from-first");
+  });
+
+  it("falls back to second path when first has no config", () => {
+    mockReadFileSync.mockImplementation((filePath) => {
+      if (String(filePath) === "/second/opencode.json") {
+        return '{ "default_agent": "from-second" }';
+      }
+      throw new Error("ENOENT");
+    });
+
+    const config = readOpenCodeConfig(["/first", "/second"]);
+    expect(config).toBeDefined();
+    expect(config!.default_agent).toBe("from-second");
   });
 
   it("strips JSONC comments", () => {
@@ -81,7 +176,7 @@ describe("readOpenCodeConfig", () => {
       throw new Error("ENOENT");
     });
 
-    const config = readOpenCodeConfig(WORKSPACE);
+    const config = readOpenCodeConfig([WORKSPACE]);
     expect(config).toBeDefined();
     expect(config!.default_agent).toBe("plan");
     expect(config!.agent).toBeDefined();
@@ -104,7 +199,7 @@ describe("readOpenCodeConfig", () => {
       throw new Error("ENOENT");
     });
 
-    const config = readOpenCodeConfig(WORKSPACE);
+    const config = readOpenCodeConfig([WORKSPACE]);
     expect(config).toBeDefined();
     expect(config!.agent!["code-reviewer"].model).toBe("openai/gpt-4");
     expect(config!.agent!["code-reviewer"].description).toBe("Reviews code");
@@ -176,7 +271,7 @@ describe("readMarkdownAgents", () => {
 
 describe("loadAgentsFromOpenCodeConfig", () => {
   it("returns built-in agents when no config exists", () => {
-    const { agents, defaultAgentId } = loadAgentsFromOpenCodeConfig(WORKSPACE);
+    const { agents, defaultAgentId } = loadAgentsFromOpenCodeConfig("", WORKSPACE);
     expect(defaultAgentId).toBe("build");
     expect(agents.length).toBeGreaterThanOrEqual(2);
     expect(agents.find((a) => a.id === "build")).toBeDefined();
@@ -200,7 +295,7 @@ describe("loadAgentsFromOpenCodeConfig", () => {
       throw new Error("ENOENT");
     });
 
-    const { agents, defaultAgentId } = loadAgentsFromOpenCodeConfig(WORKSPACE);
+    const { agents, defaultAgentId } = loadAgentsFromOpenCodeConfig("", WORKSPACE);
     expect(defaultAgentId).toBe("build");
     expect(agents.find((a) => a.id === "build")).toBeDefined();
     expect(agents.find((a) => a.id === "plan")).toBeDefined();
@@ -224,7 +319,7 @@ describe("loadAgentsFromOpenCodeConfig", () => {
       throw new Error("ENOENT");
     });
 
-    const { agents } = loadAgentsFromOpenCodeConfig(WORKSPACE);
+    const { agents } = loadAgentsFromOpenCodeConfig("", WORKSPACE);
     const build = agents.find((a) => a.id === "build");
     expect(build).toBeDefined();
     expect(build!.provider).toBe("openai");
@@ -247,7 +342,7 @@ describe("loadAgentsFromOpenCodeConfig", () => {
       throw new Error("ENOENT");
     });
 
-    const { agents } = loadAgentsFromOpenCodeConfig(WORKSPACE);
+    const { agents } = loadAgentsFromOpenCodeConfig("", WORKSPACE);
     const localAgent = agents.find((a) => a.id === "local-agent");
     expect(localAgent).toBeDefined();
     expect(localAgent!.provider).toBe("unknown");
@@ -264,7 +359,56 @@ describe("loadAgentsFromOpenCodeConfig", () => {
       throw new Error("ENOENT");
     });
 
-    const { defaultAgentId } = loadAgentsFromOpenCodeConfig(WORKSPACE);
+    const { defaultAgentId } = loadAgentsFromOpenCodeConfig("", WORKSPACE);
     expect(defaultAgentId).toBe("plan");
+  });
+
+  it("reads from custom config path first", () => {
+    mockReadFileSync.mockImplementation((filePath) => {
+      if (String(filePath) === "/custom/opencode.json") {
+        return JSON.stringify({
+          agent: {
+            "custom-agent": {
+              model: "openai/o1",
+              description: "Custom agent from explicit path",
+            },
+          },
+          default_agent: "custom-agent",
+        });
+      }
+      throw new Error("ENOENT");
+    });
+
+    const { agents, defaultAgentId } = loadAgentsFromOpenCodeConfig(
+      "/custom/opencode.json",
+      WORKSPACE
+    );
+    expect(defaultAgentId).toBe("custom-agent");
+    expect(agents.find((a) => a.id === "custom-agent")).toBeDefined();
+  });
+
+  it("falls back to ~/.config/opencode/ when no workspace or custom path", () => {
+    mockReadFileSync.mockImplementation((filePath) => {
+      if (
+        String(filePath) ===
+        path.join("/home/testuser", ".config", "opencode", "opencode.json")
+      ) {
+        return JSON.stringify({
+          agent: {
+            "global-agent": {
+              model: "anthropic/claude-sonnet-4-20250514",
+              description: "Global user agent",
+            },
+          },
+        });
+      }
+      throw new Error("ENOENT");
+    });
+
+    const { agents } = loadAgentsFromOpenCodeConfig("", undefined);
+    expect(agents.find((a) => a.id === "global-agent")).toBeDefined();
+    expect(agents.find((a) => a.id === "global-agent")!.description).toBe(
+      "Global user agent"
+    );
   });
 });

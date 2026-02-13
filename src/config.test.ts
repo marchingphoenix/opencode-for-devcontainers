@@ -14,6 +14,7 @@ describe("getConfig", () => {
   it("returns defaults when no settings are configured", () => {
     const cfg = getConfig();
     expect(cfg.opencodePath).toBe("opencode");
+    expect(cfg.opencodeConfigPath).toBe("");
     expect(cfg.devcontainerPath).toBe("");
     expect(cfg.dockerPath).toBe("docker");
     expect(cfg.devcontainerCliPath).toBe("devcontainer");

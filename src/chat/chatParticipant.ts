@@ -373,7 +373,8 @@ function handleAgents(
   }
 
   lines.push(
-    "\nTo change the default agent, set `default_agent` in your `opencode.json`."
+    "\nTo change the default agent, set `default_agent` in your `opencode.json`.",
+    "To use a custom config location, set `opencode-devcontainer.opencodeConfigPath` in VS Code settings."
   );
 
   stream.markdown(lines.join("\n"));
@@ -396,6 +397,7 @@ function handleConfig(
     `| ------- | ----- |`,
     `| Execution Mode | \`${config.get("executionMode")}\` |`,
     `| OpenCode Path | \`${config.get("opencodePath")}\` |`,
+    `| OpenCode Config | \`${config.get("opencodeConfigPath") || "(auto-detected)"}\` |`,
     `| Docker Path | \`${config.get("dockerPath")}\` |`,
     `| DevContainer CLI | \`${config.get("devcontainerCliPath")}\` |`,
     `| Default Agent | \`${agentRegistry.defaultAgentId}\` _(from opencode.json)_ |`,

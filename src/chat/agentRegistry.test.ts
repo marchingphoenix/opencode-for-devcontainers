@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { __resetMocks } from "../__mocks__/vscode";
+import { __resetMocks, __setMockConfig } from "../__mocks__/vscode";
 
 // Mock the config module to control getWorkspaceFolder.
 vi.mock("../config", () => ({
@@ -9,27 +9,29 @@ vi.mock("../config", () => ({
 
 // Mock the opencodeConfigReader module.
 vi.mock("./opencodeConfigReader", () => ({
-  loadAgentsFromOpenCodeConfig: vi.fn(() => ({
-    agents: [
-      {
-        id: "build",
-        name: "Build",
-        provider: "anthropic",
-        model: "claude-sonnet-4-20250514",
-        description: "Default coding agent with all tools enabled",
-        mode: "primary",
-      },
-      {
-        id: "plan",
-        name: "Plan",
-        provider: "anthropic",
-        model: "claude-sonnet-4-20250514",
-        description: "Planning agent with restricted tool access",
-        mode: "primary",
-      },
-    ],
-    defaultAgentId: "build",
-  })),
+  loadAgentsFromOpenCodeConfig: vi.fn(
+    (_configPath: string, _workspaceRoot: string | undefined) => ({
+      agents: [
+        {
+          id: "build",
+          name: "Build",
+          provider: "anthropic",
+          model: "claude-sonnet-4-20250514",
+          description: "Default coding agent with all tools enabled",
+          mode: "primary",
+        },
+        {
+          id: "plan",
+          name: "Plan",
+          provider: "anthropic",
+          model: "claude-sonnet-4-20250514",
+          description: "Planning agent with restricted tool access",
+          mode: "primary",
+        },
+      ],
+      defaultAgentId: "build",
+    })
+  ),
 }));
 
 import { AgentRegistry } from "./agentRegistry";
@@ -146,29 +148,45 @@ describe("custom configuration", () => {
 });
 
 // ---------------------------------------------------------------------------
-// No workspace fallback
+// opencodeConfigPath setting
 // ---------------------------------------------------------------------------
 
-describe("no workspace fallback", () => {
-  it("uses built-in defaults when no workspace is open", () => {
-    mockGetWorkspaceFolder.mockReturnValue(undefined);
-
-    registry.loadFromConfig();
-
-    const agents = registry.listAgents();
-    expect(agents).toHaveLength(2);
-    expect(agents[0].id).toBe("build");
-    expect(agents[1].id).toBe("plan");
-    expect(registry.defaultAgentId).toBe("build");
-  });
-
-  it("does not call loadAgentsFromOpenCodeConfig when no workspace", () => {
-    mockGetWorkspaceFolder.mockReturnValue(undefined);
+describe("opencodeConfigPath setting", () => {
+  it("passes opencodeConfigPath from VS Code settings to the config reader", () => {
+    __setMockConfig({
+      "opencode-devcontainer.opencodeConfigPath": "/my/custom/opencode.json",
+    });
     mockLoadAgents.mockClear();
 
     registry.loadFromConfig();
 
-    expect(mockLoadAgents).not.toHaveBeenCalled();
+    expect(mockLoadAgents).toHaveBeenCalledWith(
+      "/my/custom/opencode.json",
+      "/fake/workspace"
+    );
+  });
+
+  it("passes empty string when no opencodeConfigPath is set", () => {
+    mockLoadAgents.mockClear();
+
+    registry.loadFromConfig();
+
+    expect(mockLoadAgents).toHaveBeenCalledWith("", "/fake/workspace");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// No workspace fallback
+// ---------------------------------------------------------------------------
+
+describe("no workspace fallback", () => {
+  it("still loads agents when no workspace is open (global config)", () => {
+    mockGetWorkspaceFolder.mockReturnValue(undefined);
+
+    registry.loadFromConfig();
+
+    // loadAgentsFromOpenCodeConfig should still be called (it searches ~/.config/opencode/)
+    expect(mockLoadAgents).toHaveBeenCalledWith("", undefined);
   });
 });
 
