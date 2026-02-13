@@ -2,6 +2,11 @@ import * as vscode from "vscode";
 import { DevcontainerManager } from "./devcontainerManager";
 import { OpencodeRunner } from "./opencodeRunner";
 import { StatusBarManager } from "./statusBar";
+import { AgentRegistry } from "./chat/agentRegistry";
+import { OpenCodeBridge } from "./chat/opencodeBridge";
+import { SubagentTracker } from "./chat/subagentTracker";
+import { SubagentTreeProvider } from "./chat/subagentTreeProvider";
+import { registerChatParticipant } from "./chat/chatParticipant";
 
 let devcontainerManager: DevcontainerManager;
 let opencodeRunner: OpencodeRunner;
@@ -59,8 +64,37 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     )
   );
 
+  // --- Chat participant subsystem ---
+  const agentRegistry = new AgentRegistry();
+  const opencodeBridge = new OpenCodeBridge(devcontainerManager);
+  const subagentTracker = new SubagentTracker();
+  const subagentTreeProvider = new SubagentTreeProvider(subagentTracker);
+
+  const treeView = vscode.window.createTreeView(
+    "opencode-devcontainer.subagentActivity",
+    { treeDataProvider: subagentTreeProvider }
+  );
+
+  const chatParticipant = registerChatParticipant(
+    context,
+    devcontainerManager,
+    opencodeBridge,
+    agentRegistry,
+    subagentTracker
+  );
+
   // Register disposables
-  context.subscriptions.push(devcontainerManager, opencodeRunner, statusBarManager);
+  context.subscriptions.push(
+    devcontainerManager,
+    opencodeRunner,
+    statusBarManager,
+    agentRegistry,
+    opencodeBridge,
+    subagentTracker,
+    subagentTreeProvider,
+    treeView,
+    chatParticipant
+  );
 
   // Check for running devcontainer on activation
   await devcontainerManager.refreshStatus();

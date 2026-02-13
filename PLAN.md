@@ -173,11 +173,21 @@ class OpenCodeBridge
 ```
 
 Key decisions:
+- **CRITICAL: Shell proxy integration** — In `local-with-remote-exec` mode, the bridge
+  MUST use the existing `writeShellWrapper()` from `shellWrapper.ts` and set the `SHELL`
+  environment variable on the spawned child process. This ensures ALL tool calls that
+  invoke subshells (e.g., `sh -c "npm test"`) are routed through `docker exec` into the
+  devcontainer, matching the existing terminal-based flow in `OpencodeRunner`.
+- In `in-container` mode, the bridge spawns OpenCode inside the container via `docker exec`,
+  so no shell wrapper is needed (commands already execute in-container).
+- The bridge respects `config.executionMode` to choose between these two modes.
+- The bridge reuses `OpencodeRunner.resolveForwardedEnvVars()` logic (extracted to a shared
+  utility) to forward API keys and OPENCODE_* env vars into the shell wrapper.
 - The bridge spawns `opencode` with flags for JSON output mode
-- If running in devcontainer mode, it spawns via `docker exec`
 - Uses the existing `DevcontainerManager` to get container ID and workspace folder
 - Emits parsed `OpenCodeEvent` objects for each line of output
 - Manages lifecycle (start, stop, restart on crash)
+- Cleans up the shell wrapper script on stop/dispose (via `removeShellWrapper()`)
 
 ### Step 4: Implement OpenCode Adapter (`src/chat/opencodeAdapter.ts`)
 
