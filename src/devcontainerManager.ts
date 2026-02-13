@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { ChildProcess, exec, spawn } from "child_process";
+import { exec } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
 import { getConfig, getWorkspaceFolder } from "./config";

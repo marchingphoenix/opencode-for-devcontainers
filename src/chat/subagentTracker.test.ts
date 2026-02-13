@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { __resetMocks } from "../__mocks__/vscode";
 import { SubagentTracker } from "./subagentTracker";
-import { OpenCodeEvent } from "./types";
 
 let tracker: SubagentTracker;
 

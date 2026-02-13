@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { __resetMocks, __setMockConfig } from "../__mocks__/vscode";
 import { ResponseRenderer } from "./responseRenderer";
-import { OpenCodeEvent, SubagentInfo, AgentConfig } from "./types";
+import { SubagentInfo, AgentConfig } from "./types";
 
 let renderer: ResponseRenderer;
 let stream: {
