@@ -1,53 +1,69 @@
 import * as vscode from "vscode";
 import { AgentConfig } from "./types";
+import { getWorkspaceFolder } from "../config";
+import { loadAgentsFromOpenCodeConfig } from "./opencodeConfigReader";
 
 /**
  * Manages the set of configured OpenCode agents.
  *
- * Reads agent definitions from VS Code settings
- * (`opencode-devcontainer.agents`) and exposes helpers for
- * listing, looking-up, and switching the active default agent.
+ * Reads agent definitions from OpenCode configuration files, searching
+ * (in order):
+ *  1. The explicit path set via `opencode-devcontainer.opencodeConfigPath`
+ *  2. The workspace root (`opencode.json` / `opencode.jsonc`)
+ *  3. `~/.config/opencode/`
+ *
+ * Also picks up markdown-based agents from `.opencode/agents/` in the
+ * workspace.
+ *
+ * Falls back to built-in defaults (build + plan) when no config is found.
  */
 export class AgentRegistry implements vscode.Disposable {
   private agents = new Map<string, AgentConfig>();
-  private _defaultAgentId = "default";
+  private _defaultAgentId = "build";
 
   private readonly _onAgentsChanged = new vscode.EventEmitter<void>();
   public readonly onAgentsChanged = this._onAgentsChanged.event;
 
+  private fileWatcher: vscode.FileSystemWatcher | undefined;
   private configListener: vscode.Disposable;
 
   constructor() {
     this.loadFromConfig();
 
+    // Watch for changes to opencode config files in the workspace.
+    this.fileWatcher = vscode.workspace.createFileSystemWatcher(
+      "**/opencode.{json,jsonc}"
+    );
+    this.fileWatcher.onDidChange(() => this.loadFromConfig());
+    this.fileWatcher.onDidCreate(() => this.loadFromConfig());
+    this.fileWatcher.onDidDelete(() => this.loadFromConfig());
+
+    // Reload when the user changes the opencodeConfigPath setting.
     this.configListener = vscode.workspace.onDidChangeConfiguration((e) => {
-      if (
-        e.affectsConfiguration("opencode-devcontainer.agents") ||
-        e.affectsConfiguration("opencode-devcontainer.defaultAgent")
-      ) {
+      if (e.affectsConfiguration("opencode-devcontainer.opencodeConfigPath")) {
         this.loadFromConfig();
       }
     });
   }
 
-  /** Reload agents from VS Code settings. */
+  /** Reload agents from the OpenCode configuration files. */
   loadFromConfig(): void {
-    const config = vscode.workspace.getConfiguration("opencode-devcontainer");
-    const agentDefs = config.get<AgentConfig[]>("agents", [
-      {
-        id: "default",
-        name: "Default Agent",
-        provider: "anthropic",
-        model: "claude-sonnet-4-5-20250929",
-      },
-    ]);
+    const workspaceRoot = getWorkspaceFolder();
+    const opencodeConfigPath = vscode.workspace
+      .getConfiguration("opencode-devcontainer")
+      .get<string>("opencodeConfigPath", "");
+
+    const { agents, defaultAgentId } = loadAgentsFromOpenCodeConfig(
+      opencodeConfigPath,
+      workspaceRoot
+    );
 
     this.agents.clear();
-    for (const agent of agentDefs) {
+    for (const agent of agents) {
       this.agents.set(agent.id, agent);
     }
 
-    this._defaultAgentId = config.get<string>("defaultAgent", "default");
+    this._defaultAgentId = defaultAgentId;
 
     // Ensure the configured default exists; fall back to the first entry.
     if (!this.agents.has(this._defaultAgentId) && this.agents.size > 0) {
@@ -64,10 +80,12 @@ export class AgentRegistry implements vscode.Disposable {
   getDefaultAgent(): AgentConfig {
     return (
       this.agents.get(this._defaultAgentId) ?? {
-        id: "default",
-        name: "Default Agent",
+        id: "build",
+        name: "Build",
         provider: "anthropic",
-        model: "claude-sonnet-4-5-20250929",
+        model: "claude-sonnet-4-20250514",
+        description: "Default coding agent with all tools enabled",
+        mode: "primary" as const,
       }
     );
   }
@@ -89,6 +107,7 @@ export class AgentRegistry implements vscode.Disposable {
   }
 
   dispose(): void {
+    this.fileWatcher?.dispose();
     this.configListener.dispose();
     this._onAgentsChanged.dispose();
   }

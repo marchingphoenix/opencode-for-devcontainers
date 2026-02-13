@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 
 export interface ExtensionConfig {
   opencodePath: string;
+  opencodeConfigPath: string;
   devcontainerPath: string;
   dockerPath: string;
   devcontainerCliPath: string;
@@ -15,6 +16,7 @@ export function getConfig(): ExtensionConfig {
   const config = vscode.workspace.getConfiguration("opencode-devcontainer");
   return {
     opencodePath: config.get<string>("opencodePath", "opencode"),
+    opencodeConfigPath: config.get<string>("opencodeConfigPath", ""),
     devcontainerPath: config.get<string>("devcontainerPath", ""),
     dockerPath: config.get<string>("dockerPath", "docker"),
     devcontainerCliPath: config.get<string>("devcontainerCliPath", "devcontainer"),

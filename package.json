@@ -2,7 +2,7 @@
   "name": "opencode-for-devcontainers",
   "displayName": "OpenCode for Dev Containers",
   "description": "Run OpenCode locally but execute commands within a devcontainer",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "publisher": "marchingphoenix",
   "license": "MIT",
   "repository": {
@@ -100,6 +100,11 @@
           "default": "devcontainer",
           "description": "Path to the devcontainer CLI binary"
         },
+        "opencode-devcontainer.opencodeConfigPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the OpenCode configuration file (opencode.json or opencode.jsonc). When empty, searches the workspace root and ~/.config/opencode/ automatically."
+        },
         "opencode-devcontainer.executionMode": {
           "type": "string",
           "enum": [
@@ -134,34 +139,6 @@
             "type": "string"
           },
           "description": "Environment variable names (or patterns with *) to forward from the host to the container"
-        },
-        "opencode-devcontainer.agents": {
-          "type": "array",
-          "default": [
-            {
-              "id": "default",
-              "name": "Default Agent",
-              "provider": "anthropic",
-              "model": "claude-sonnet-4-5-20250929"
-            }
-          ],
-          "items": {
-            "type": "object",
-            "properties": {
-              "id": { "type": "string" },
-              "name": { "type": "string" },
-              "provider": { "type": "string" },
-              "model": { "type": "string" },
-              "description": { "type": "string" }
-            },
-            "required": ["id", "name", "provider", "model"]
-          },
-          "description": "Configured OpenCode agents (AI provider/model combinations)"
-        },
-        "opencode-devcontainer.defaultAgent": {
-          "type": "string",
-          "default": "default",
-          "description": "ID of the default agent to use in the chat window"
         },
         "opencode-devcontainer.chat.showToolCalls": {
           "type": "boolean",
