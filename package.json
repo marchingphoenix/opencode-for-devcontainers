@@ -2,7 +2,7 @@
   "name": "opencode-for-devcontainers",
   "displayName": "OpenCode for Dev Containers",
   "description": "Run OpenCode locally but execute commands within a devcontainer",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "marchingphoenix",
   "license": "MIT",
   "repository": {
