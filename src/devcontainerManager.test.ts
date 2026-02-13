@@ -1,5 +1,4 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import * as childProcess from "child_process";
 import {
   __resetMocks,
   __setMockConfig,

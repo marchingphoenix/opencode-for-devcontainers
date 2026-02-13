@@ -7,7 +7,7 @@ import {
   Uri,
   EventEmitter,
 } from "../__mocks__/vscode";
-import { OpenCodeBridge, BridgeState } from "./opencodeBridge";
+import { OpenCodeBridge } from "./opencodeBridge";
 import { DevcontainerState } from "../devcontainerManager";
 import { Readable, Writable } from "stream";
 
