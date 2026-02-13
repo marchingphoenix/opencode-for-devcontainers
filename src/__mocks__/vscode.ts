@@ -156,6 +156,15 @@ function makeConfigProxy(section: string) {
   };
 }
 
+function createMockFileSystemWatcher() {
+  return {
+    onDidChange: vi.fn((_cb: unknown) => ({ dispose: vi.fn() })),
+    onDidCreate: vi.fn((_cb: unknown) => ({ dispose: vi.fn() })),
+    onDidDelete: vi.fn((_cb: unknown) => ({ dispose: vi.fn() })),
+    dispose: vi.fn(),
+  };
+}
+
 export const workspace = {
   getConfiguration: vi.fn((section?: string) => makeConfigProxy(section ?? "")),
   get workspaceFolders() {
@@ -164,6 +173,9 @@ export const workspace = {
   onDidChangeConfiguration: vi.fn((_cb: unknown) => ({
     dispose: vi.fn(),
   })),
+  createFileSystemWatcher: vi.fn((_pattern: string) =>
+    createMockFileSystemWatcher()
+  ),
 };
 
 // ---------------------------------------------------------------------------
@@ -266,6 +278,10 @@ export function __resetMocks(): void {
   // Reset all vi.fn() mocks
   workspace.getConfiguration.mockClear();
   workspace.onDidChangeConfiguration.mockClear();
+  workspace.createFileSystemWatcher.mockClear();
+  workspace.createFileSystemWatcher.mockImplementation(
+    (_pattern: string) => createMockFileSystemWatcher()
+  );
   window.createStatusBarItem.mockClear();
   window.createTerminal.mockClear();
   window.showErrorMessage.mockClear();

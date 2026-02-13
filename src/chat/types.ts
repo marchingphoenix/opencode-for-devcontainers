@@ -16,6 +16,7 @@ export interface AgentConfig {
   provider: string;
   model: string;
   description?: string;
+  mode?: "primary" | "subagent";
 }
 
 // ---------------------------------------------------------------------------

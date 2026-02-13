@@ -341,19 +341,39 @@ function handleAgents(
   const agents = agentRegistry.listAgents();
   const defaultId = agentRegistry.defaultAgentId;
 
-  const lines = ["## Configured Agents\n"];
-  for (const agent of agents) {
-    const active = agent.id === defaultId ? " **(active)**" : "";
-    lines.push(
-      `- **${agent.name}**${active} — ${agent.provider}/${agent.model}`
-    );
-    if (agent.description) {
-      lines.push(`  _${agent.description}_`);
+  const primaryAgents = agents.filter((a) => a.mode !== "subagent");
+  const subagents = agents.filter((a) => a.mode === "subagent");
+
+  const lines = ["## OpenCode Agents\n"];
+  lines.push("_Loaded from `opencode.json` / `.opencode/agents/`_\n");
+
+  if (primaryAgents.length > 0) {
+    lines.push("### Primary Agents\n");
+    for (const agent of primaryAgents) {
+      const active = agent.id === defaultId ? " **(active)**" : "";
+      lines.push(
+        `- **${agent.name}**${active} — \`${agent.provider}/${agent.model}\``
+      );
+      if (agent.description) {
+        lines.push(`  _${agent.description}_`);
+      }
+    }
+  }
+
+  if (subagents.length > 0) {
+    lines.push("\n### Subagents\n");
+    for (const agent of subagents) {
+      lines.push(
+        `- **${agent.name}** — \`${agent.provider}/${agent.model}\``
+      );
+      if (agent.description) {
+        lines.push(`  _${agent.description}_`);
+      }
     }
   }
 
   lines.push(
-    "\nTo switch agents, update `opencode-devcontainer.defaultAgent` in settings."
+    "\nTo change the default agent, set `default_agent` in your `opencode.json`."
   );
 
   stream.markdown(lines.join("\n"));
@@ -378,7 +398,8 @@ function handleConfig(
     `| OpenCode Path | \`${config.get("opencodePath")}\` |`,
     `| Docker Path | \`${config.get("dockerPath")}\` |`,
     `| DevContainer CLI | \`${config.get("devcontainerCliPath")}\` |`,
-    `| Default Agent | \`${agentRegistry.defaultAgentId}\` |`,
+    `| Default Agent | \`${agentRegistry.defaultAgentId}\` _(from opencode.json)_ |`,
+    `| Total Agents | \`${agentRegistry.listAgents().length}\` _(from opencode.json)_ |`,
     `| Show Tool Calls | \`${config.get("chat.showToolCalls")}\` |`,
     `| Show Subagent Tree | \`${config.get("chat.showSubagentTree")}\` |`,
   ];

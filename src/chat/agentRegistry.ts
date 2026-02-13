@@ -1,53 +1,76 @@
 import * as vscode from "vscode";
 import { AgentConfig } from "./types";
+import { getWorkspaceFolder } from "../config";
+import { loadAgentsFromOpenCodeConfig } from "./opencodeConfigReader";
 
 /**
  * Manages the set of configured OpenCode agents.
  *
- * Reads agent definitions from VS Code settings
- * (`opencode-devcontainer.agents`) and exposes helpers for
- * listing, looking-up, and switching the active default agent.
+ * Reads agent definitions from the workspace's OpenCode configuration
+ * files (`opencode.json` / `opencode.jsonc` and `.opencode/agents/`
+ * markdown files), matching the same sources that the OpenCode CLI
+ * itself uses.
+ *
+ * Falls back to built-in defaults (build + plan) when no config is found.
  */
 export class AgentRegistry implements vscode.Disposable {
   private agents = new Map<string, AgentConfig>();
-  private _defaultAgentId = "default";
+  private _defaultAgentId = "build";
 
   private readonly _onAgentsChanged = new vscode.EventEmitter<void>();
   public readonly onAgentsChanged = this._onAgentsChanged.event;
 
-  private configListener: vscode.Disposable;
+  private fileWatcher: vscode.FileSystemWatcher | undefined;
 
   constructor() {
     this.loadFromConfig();
 
-    this.configListener = vscode.workspace.onDidChangeConfiguration((e) => {
-      if (
-        e.affectsConfiguration("opencode-devcontainer.agents") ||
-        e.affectsConfiguration("opencode-devcontainer.defaultAgent")
-      ) {
-        this.loadFromConfig();
-      }
-    });
+    // Watch for changes to opencode config files in the workspace.
+    this.fileWatcher = vscode.workspace.createFileSystemWatcher(
+      "**/opencode.{json,jsonc}"
+    );
+    this.fileWatcher.onDidChange(() => this.loadFromConfig());
+    this.fileWatcher.onDidCreate(() => this.loadFromConfig());
+    this.fileWatcher.onDidDelete(() => this.loadFromConfig());
   }
 
-  /** Reload agents from VS Code settings. */
+  /** Reload agents from the workspace's OpenCode configuration files. */
   loadFromConfig(): void {
-    const config = vscode.workspace.getConfiguration("opencode-devcontainer");
-    const agentDefs = config.get<AgentConfig[]>("agents", [
-      {
-        id: "default",
-        name: "Default Agent",
+    const workspaceRoot = getWorkspaceFolder();
+
+    if (!workspaceRoot) {
+      // No workspace — use built-in defaults.
+      this.agents.clear();
+      this.agents.set("build", {
+        id: "build",
+        name: "Build",
         provider: "anthropic",
-        model: "claude-sonnet-4-5-20250929",
-      },
-    ]);
+        model: "claude-sonnet-4-20250514",
+        description: "Default coding agent with all tools enabled",
+        mode: "primary",
+      });
+      this.agents.set("plan", {
+        id: "plan",
+        name: "Plan",
+        provider: "anthropic",
+        model: "claude-sonnet-4-20250514",
+        description: "Planning agent with restricted tool access",
+        mode: "primary",
+      });
+      this._defaultAgentId = "build";
+      this._onAgentsChanged.fire();
+      return;
+    }
+
+    const { agents, defaultAgentId } =
+      loadAgentsFromOpenCodeConfig(workspaceRoot);
 
     this.agents.clear();
-    for (const agent of agentDefs) {
+    for (const agent of agents) {
       this.agents.set(agent.id, agent);
     }
 
-    this._defaultAgentId = config.get<string>("defaultAgent", "default");
+    this._defaultAgentId = defaultAgentId;
 
     // Ensure the configured default exists; fall back to the first entry.
     if (!this.agents.has(this._defaultAgentId) && this.agents.size > 0) {
@@ -64,10 +87,12 @@ export class AgentRegistry implements vscode.Disposable {
   getDefaultAgent(): AgentConfig {
     return (
       this.agents.get(this._defaultAgentId) ?? {
-        id: "default",
-        name: "Default Agent",
+        id: "build",
+        name: "Build",
         provider: "anthropic",
-        model: "claude-sonnet-4-5-20250929",
+        model: "claude-sonnet-4-20250514",
+        description: "Default coding agent with all tools enabled",
+        mode: "primary" as const,
       }
     );
   }
@@ -89,7 +114,7 @@ export class AgentRegistry implements vscode.Disposable {
   }
 
   dispose(): void {
-    this.configListener.dispose();
+    this.fileWatcher?.dispose();
     this._onAgentsChanged.dispose();
   }
 }
