@@ -25,10 +25,36 @@
   ],
   "activationEvents": [
     "workspaceContains:.devcontainer/devcontainer.json",
-    "workspaceContains:.devcontainer.json"
+    "workspaceContains:.devcontainer.json",
+    "onChatParticipant:opencode-devcontainer.opencode"
   ],
   "main": "./dist/extension.js",
   "contributes": {
+    "chatParticipants": [
+      {
+        "id": "opencode-devcontainer.opencode",
+        "name": "opencode",
+        "fullName": "OpenCode",
+        "description": "AI coding agent running in your dev container",
+        "isSticky": true,
+        "commands": [
+          { "name": "ask", "description": "Ask OpenCode a question" },
+          { "name": "exec", "description": "Execute a command in the dev container" },
+          { "name": "status", "description": "Show agent and container status" },
+          { "name": "agents", "description": "List and switch between configured agents" },
+          { "name": "config", "description": "Show or change configuration" }
+        ]
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "opencode-devcontainer.subagentActivity",
+          "name": "OpenCode Agents",
+          "when": "opencode-devcontainer.chatActive"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "opencode-devcontainer.startDevcontainer",
@@ -108,6 +134,44 @@
             "type": "string"
           },
           "description": "Environment variable names (or patterns with *) to forward from the host to the container"
+        },
+        "opencode-devcontainer.agents": {
+          "type": "array",
+          "default": [
+            {
+              "id": "default",
+              "name": "Default Agent",
+              "provider": "anthropic",
+              "model": "claude-sonnet-4-5-20250929"
+            }
+          ],
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "name": { "type": "string" },
+              "provider": { "type": "string" },
+              "model": { "type": "string" },
+              "description": { "type": "string" }
+            },
+            "required": ["id", "name", "provider", "model"]
+          },
+          "description": "Configured OpenCode agents (AI provider/model combinations)"
+        },
+        "opencode-devcontainer.defaultAgent": {
+          "type": "string",
+          "default": "default",
+          "description": "ID of the default agent to use in the chat window"
+        },
+        "opencode-devcontainer.chat.showToolCalls": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show individual tool call details in chat responses"
+        },
+        "opencode-devcontainer.chat.showSubagentTree": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the subagent activity tree view"
         }
       }
     }
