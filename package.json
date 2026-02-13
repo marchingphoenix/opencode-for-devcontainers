@@ -1,0 +1,134 @@
+{
+  "name": "opencode-for-devcontainers",
+  "displayName": "OpenCode for Dev Containers",
+  "description": "Run OpenCode locally but execute commands within a devcontainer",
+  "version": "0.1.0",
+  "publisher": "marchingphoenix",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/marchingphoenix/opencode-for-devcontainers"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "opencode",
+    "devcontainer",
+    "dev containers",
+    "docker",
+    "ai",
+    "coding assistant"
+  ],
+  "activationEvents": [
+    "workspaceContains:.devcontainer/devcontainer.json",
+    "workspaceContains:.devcontainer.json"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "opencode-devcontainer.startDevcontainer",
+        "title": "OpenCode: Start Dev Container"
+      },
+      {
+        "command": "opencode-devcontainer.stopDevcontainer",
+        "title": "OpenCode: Stop Dev Container"
+      },
+      {
+        "command": "opencode-devcontainer.launchOpenCode",
+        "title": "OpenCode: Launch in Dev Container Mode"
+      },
+      {
+        "command": "opencode-devcontainer.launchOpenCodeInContainer",
+        "title": "OpenCode: Launch Inside Dev Container"
+      },
+      {
+        "command": "opencode-devcontainer.showStatus",
+        "title": "OpenCode: Show Dev Container Status"
+      }
+    ],
+    "configuration": {
+      "title": "OpenCode for Dev Containers",
+      "properties": {
+        "opencode-devcontainer.opencodePath": {
+          "type": "string",
+          "default": "opencode",
+          "description": "Path to the OpenCode binary on the host machine"
+        },
+        "opencode-devcontainer.devcontainerPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the devcontainer configuration directory (defaults to .devcontainer in the workspace root)"
+        },
+        "opencode-devcontainer.dockerPath": {
+          "type": "string",
+          "default": "docker",
+          "description": "Path to the Docker CLI binary"
+        },
+        "opencode-devcontainer.devcontainerCliPath": {
+          "type": "string",
+          "default": "devcontainer",
+          "description": "Path to the devcontainer CLI binary"
+        },
+        "opencode-devcontainer.executionMode": {
+          "type": "string",
+          "enum": [
+            "local-with-remote-exec",
+            "in-container"
+          ],
+          "default": "local-with-remote-exec",
+          "enumDescriptions": [
+            "Run OpenCode locally, execute shell commands in the devcontainer (recommended)",
+            "Run OpenCode entirely inside the devcontainer"
+          ],
+          "description": "How to run OpenCode with devcontainer integration"
+        },
+        "opencode-devcontainer.containerWorkspaceFolder": {
+          "type": "string",
+          "default": "",
+          "description": "Workspace folder path inside the container (auto-detected from devcontainer.json if empty)"
+        },
+        "opencode-devcontainer.additionalEnvVars": {
+          "type": "object",
+          "default": {},
+          "description": "Additional environment variables to pass to OpenCode"
+        },
+        "opencode-devcontainer.forwardEnvVars": {
+          "type": "array",
+          "default": [
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "OPENCODE_*"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Environment variable names (or patterns with *) to forward from the host to the container"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.js --production",
+    "watch": "node esbuild.js --watch",
+    "lint": "eslint src --ext ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "esbuild": "^0.20.0",
+    "eslint": "^8.56.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.2.0"
+  }
+}
