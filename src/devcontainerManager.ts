@@ -282,8 +282,21 @@ export class DevcontainerManager {
     command: string,
     options?: { cwd?: string }
   ): Promise<{ stdout: string; stderr: string }> {
+    // When the command binary is an absolute path, ensure its parent directory
+    // is on PATH. This fixes environments where node is managed by nvm and the
+    // devcontainer CLI (a #!/usr/bin/env node script) lives in the same bin
+    // directory as the node binary, but that directory isn't on the default
+    // PATH inherited by child processes (common when VS Code is launched from
+    // the OS application launcher rather than a terminal).
+    const env = { ...process.env };
+    const binaryPath = command.split(" ")[0];
+    if (path.isAbsolute(binaryPath)) {
+      const binDir = path.dirname(binaryPath);
+      env.PATH = binDir + path.delimiter + (env.PATH || "");
+    }
+
     return new Promise((resolve, reject) => {
-      exec(command, { cwd: options?.cwd, timeout: 120000 }, (error, stdout, stderr) => {
+      exec(command, { cwd: options?.cwd, timeout: 120000, env }, (error, stdout, stderr) => {
         if (error) {
           reject(new Error(`Command failed: ${command}\n${stderr || error.message}`));
           return;

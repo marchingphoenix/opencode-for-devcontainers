@@ -33,9 +33,11 @@ vi.mock("child_process", async () => {
 
 // Import after mocking
 import * as fs from "fs";
+import { exec } from "child_process";
 
 const mockExistsSync = fs.existsSync as ReturnType<typeof vi.fn>;
 const mockReadFileSync = fs.readFileSync as ReturnType<typeof vi.fn>;
+const mockExec = exec as unknown as ReturnType<typeof vi.fn>;
 
 let manager: DevcontainerManager;
 
@@ -212,6 +214,73 @@ describe("stopDevcontainer", () => {
     expect(vscode.window.showWarningMessage).toHaveBeenCalledWith(
       "No dev container is currently tracked."
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// startDevcontainer – PATH augmentation
+// ---------------------------------------------------------------------------
+
+describe("startDevcontainer PATH handling", () => {
+  beforeEach(() => {
+    mockExistsSync.mockImplementation((p: unknown) => {
+      return String(p) === "/home/user/project/.devcontainer/devcontainer.json";
+    });
+  });
+
+  it("prepends bin directory to PATH when devcontainerCliPath is absolute", async () => {
+    __setMockConfig({
+      "opencode-devcontainer.devcontainerCliPath": "/usr/local/nvm/versions/node/v20/bin/devcontainer",
+    });
+
+    // Make exec call succeed with a container ID
+    mockExec.mockImplementation(
+      (
+        cmd: string,
+        opts: Record<string, unknown>,
+        cb: (err: Error | null, stdout: string, stderr: string) => void
+      ) => {
+        if (cmd.includes("devcontainer up")) {
+          // Verify that the env.PATH starts with the binary's directory
+          const env = opts.env as Record<string, string>;
+          expect(env).toBeDefined();
+          expect(env.PATH).toMatch(/^\/usr\/local\/nvm\/versions\/node\/v20\/bin/);
+          cb(null, JSON.stringify({ containerId: "abc123" }), "");
+        } else {
+          cb(null, "", "");
+        }
+      }
+    );
+
+    await manager.startDevcontainer();
+    expect(mockExec).toHaveBeenCalled();
+  });
+
+  it("does not modify PATH when devcontainerCliPath is a bare command", async () => {
+    __setMockConfig({
+      "opencode-devcontainer.devcontainerCliPath": "devcontainer",
+    });
+
+    const originalPath = process.env.PATH;
+
+    mockExec.mockImplementation(
+      (
+        cmd: string,
+        opts: Record<string, unknown>,
+        cb: (err: Error | null, stdout: string, stderr: string) => void
+      ) => {
+        if (cmd.includes("devcontainer up")) {
+          const env = opts.env as Record<string, string>;
+          expect(env.PATH).toBe(originalPath);
+          cb(null, JSON.stringify({ containerId: "abc123" }), "");
+        } else {
+          cb(null, "", "");
+        }
+      }
+    );
+
+    await manager.startDevcontainer();
+    expect(mockExec).toHaveBeenCalled();
   });
 });
 
